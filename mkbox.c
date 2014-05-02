@@ -62,6 +62,7 @@ int main(int argc, char **argv) {
 	uid_t uid;
 	gid_t gid;
 	pid_t cpid;
+	int new_pid_ns = 0;
 
 	if (argc != 3) {
 		fprintf(stderr,
@@ -74,8 +75,12 @@ int main(int argc, char **argv) {
 	uid = getuid();
 	gid = getgid();
 
-	ok(unshare, CLONE_NEWPID|CLONE_NEWNS|CLONE_NEWUTS|
-		CLONE_NEWIPC|CLONE_NEWUSER);
+	int unshare_flags = CLONE_NEWNS|CLONE_NEWUTS|
+		CLONE_NEWIPC|CLONE_NEWUSER|CLONE_NEWNET;
+	if (new_pid_ns) {
+		unshare_flags |= CLONE_NEWPID;
+	}
+	ok(unshare, unshare_flags);
 
 	/* ensure that changes to our mount namespace do not "leak" to
 	 * outside namespaces (what mount --make-rprivate / does)
@@ -92,9 +97,11 @@ int main(int argc, char **argv) {
 	/* setup needed subdirectories */
 	rmdir("data");
 	rmdir("dev");
+	rmdir("proc");
 	rmdir(".oldroot");
 	ok(mkdir, "data", 0755);
 	ok(mkdir, "dev", 0755);
+	ok(mkdir, "proc", 0755);
 	ok(mkdir, ".oldroot", 0755);
 
 	/* mount read-write data volume */
@@ -114,25 +121,33 @@ int main(int argc, char **argv) {
 	ok(mount, "/dev/null", "dev/null", NULL, MS_BIND, NULL);
 	ok(mount, "/dev/zero", "dev/zero", NULL, MS_BIND, NULL);
 
+	if (!new_pid_ns) {
+		// Fails: errno=22 (Invalid argument)
+		ok(mount, "/proc", "proc", NULL, MS_BIND, NULL);
+	}
+	
 	/* note: MS_RDONLY does not work when doing the initial bind */
 	ok(mount, "dev", "dev", NULL,
 		MS_RDONLY|MS_NOSUID|MS_NOEXEC|MS_REMOUNT|MS_NOATIME|MS_BIND,
 		NULL);
 
 	/* map UID/GID 3333/3333 to outer UID/GID */
-	sprintf(buf, "3333 %d 1\n", uid);
+	int newuid = 3333;
+	int newgid = 3333;
+	
+	sprintf(buf, "%d %d 1\n", newuid, uid);
 	fd = ok(open, "/proc/self/uid_map", O_WRONLY);
 	ok(write, fd, buf, strlen(buf));
 	ok(close, fd);
 
-	sprintf(buf, "3333 %d 1\n", gid);
+	sprintf(buf, "%d %d 1\n", newgid, gid);
 	fd = ok(open, "/proc/self/gid_map", O_WRONLY);
 	ok(write, fd, buf, strlen(buf));
 	ok(close, fd);
 
 	/* initially we're nobody, change to 3333 */	
-	ok(setresgid, 3333, 3333, 3333);
-	ok(setresuid, 3333, 3333, 3333);
+	ok(setresgid, newgid, newgid, newgid);
+	ok(setresuid, newuid, newuid, newuid);
 
 	/* sandbox becomes our new root, detach the old one */
 	ok(pivot_root, ".", ".oldroot");
@@ -145,7 +160,7 @@ int main(int argc, char **argv) {
 		NULL);
 
 	/* discard all capability bits */
-	ok(dropcaps);
+	//ok(dropcaps);
 
 	/* we must fork to become pid 1 in the new pid namespace */
 	cpid = ok(fork);
@@ -154,6 +169,10 @@ int main(int argc, char **argv) {
 		if (getpid() != 1) {
 			fprintf(stderr, "mkbox child pid != 1?!\n");
 			return -1;
+		}
+		if (new_pid_ns) {
+			// errno=1 (Operation not permitted)
+			ok(mount, "/proc", "/proc", "proc", MS_NOSUID|MS_NOATIME, NULL);
 		}
 		ok(execl, "/bin/sh", "/bin/sh", NULL);
 		exit(0);
@@ -176,3 +195,4 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "mkbox: exiting\n");
 	return 0;
 }
+
